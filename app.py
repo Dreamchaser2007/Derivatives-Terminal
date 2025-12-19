@@ -12,7 +12,9 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import io
-from datetime import datetime, timedelta
+
+from datetime import datetime  
+NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "005f0fd8d17d41f88bcfd33fbd7f4d09")
 
 app = Flask(__name__)
 
@@ -22,7 +24,6 @@ _news_cache = {}
 _PRICE_TTL = 60
 _CHAIN_TTL = 600
 _NEWS_TTL = 3600
-NEWS_API_KEY = "005f0fd8d17d41f88bcfd33fbd7f4d09"
 
 CURRENCY_ETFS = {
     "EUR": "FXE",
@@ -92,6 +93,13 @@ def sanitize_symbol(symbol: str) -> str:
     while s.startswith("$"):
         s = s[1:]
     return s
+
+def _truthy(val) -> bool:
+    if isinstance(val, bool):
+        return val
+    if val is None:
+        return False
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
 def is_fx_symbol(s: str) -> bool:
@@ -305,7 +313,16 @@ def black_scholes_price(S, K, r, sigma, T, option_type="call", q=0.0):
 
 def bs_greeks(S, K, r, sigma, T, q=0.0):
     if T <= 0 or sigma <= 0:
-        return {"delta": 0.0, "gamma": 0.0, "vega": 0.0, "theta": 0.0, "rho": 0.0}
+        return {
+            "delta_call": 0.0,
+            "delta_put": 0.0,
+            "gamma": 0.0,
+            "vega": 0.0,
+            "theta_call": 0.0,
+            "theta_put": 0.0,
+            "rho_call": 0.0,
+            "rho_put": 0.0,
+        }
     d1 = (math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
     d2 = d1 - sigma * math.sqrt(T)
     delta_call = math.exp(-q * T) * norm_cdf(d1)
@@ -574,14 +591,14 @@ def scenario_analysis(S, K, r, sigma, T, option_type="call", model="bs", q=0.0):
     if model == "bs":
         base_price = black_scholes_price(S, K, r, sigma, T, option_type=option_type, q=q)
     else:
-        base_price = garman_kohlhagen_price(S, K, r, sigma, T, option_type=option_type)
+        base_price = garman_kohlhagen_price(S, K, r, q, sigma, T, option_type=option_type)
     scenarios["base"] = {"S": S, "sigma": sigma, "r": r, "price": base_price, "pnl": 0}
     for spot_chg in [-0.10, -0.05, 0.05, 0.10]:
         S_new = S * (1 + spot_chg)
         if model == "bs":
             p = black_scholes_price(S_new, K, r, sigma, T, option_type=option_type, q=q)
         else:
-            p = garman_kohlhagen_price(S_new, K, r, sigma, T, option_type=option_type)
+            p = garman_kohlhagen_price(S_new, K, r, q, sigma, T, option_type=option_type)
         pnl = p - base_price
         scenarios[f"spot_{spot_chg:+.0%}"] = {"S": S_new, "sigma": sigma, "r": r, "price": p, "pnl": pnl}
     for vol_chg in [-0.20, -0.10, 0.10, 0.20]:
@@ -589,7 +606,7 @@ def scenario_analysis(S, K, r, sigma, T, option_type="call", model="bs", q=0.0):
         if model == "bs":
             p = black_scholes_price(S, K, r, sigma_new, T, option_type=option_type, q=q)
         else:
-            p = garman_kohlhagen_price(S, K, r, sigma_new, T, option_type=option_type)
+            p = garman_kohlhagen_price(S, K, r, q, sigma_new, T, option_type=option_type)
         pnl = p - base_price
         scenarios[f"vol_{vol_chg:+.0%}"] = {"S": S, "sigma": sigma_new, "r": r, "price": p, "pnl": pnl}
     for rate_chg in [-0.005, 0.005]:
@@ -597,7 +614,7 @@ def scenario_analysis(S, K, r, sigma, T, option_type="call", model="bs", q=0.0):
         if model == "bs":
             p = black_scholes_price(S, K, r_new, sigma, T, option_type=option_type, q=q)
         else:
-            p = garman_kohlhagen_price(S, K, r_new, sigma, T, option_type=option_type)
+            p = garman_kohlhagen_price(S, K, r_new, q, sigma, T, option_type=option_type)
         pnl = p - base_price
         scenarios[f"rate_{rate_chg:+.0%}"] = {"S": S, "sigma": sigma, "r": r_new, "price": p, "pnl": pnl}
     return scenarios
@@ -650,7 +667,7 @@ def index():
         "option_type": "call",
         "model": "gk",
         "symbol": "EURUSD=X",
-        "use_live_price": "yes",
+        "use_live_price": True,
         "S": "",
         "K": "",
         "rd": 0.05,
@@ -663,7 +680,7 @@ def index():
         "option_type": "call",
         "model": "bs",
         "symbol": "AAPL",
-        "use_live_price": "yes",
+        "use_live_price": True,
         "S": "",
         "K": "",
         "r": 0.05,
@@ -678,7 +695,7 @@ def index():
         "option_type": "call",
         "model": "bs",
         "symbol": "AAPL",
-        "use_live_price": "yes",
+        "use_live_price": True,
         "S": "",
         "K": "",
         "r": 0.05,
@@ -689,7 +706,7 @@ def index():
     comparison_form = {
         "option_type": "call",
         "symbol": "AAPL",
-        "use_live_price": "yes",
+        "use_live_price": True,
         "S": "",
         "K": "",
         "r": 0.05,
@@ -740,7 +757,7 @@ def index():
             fx_form["option_type"] = request.form.get("fx_option_type", fx_form["option_type"])
             fx_form["model"] = request.form.get("fx_model", fx_form["model"])
             fx_form["symbol"] = sanitize_symbol(request.form.get("fx_symbol", fx_form["symbol"]))
-            fx_form["use_live_price"] = request.form.get("fx_use_live_price")
+            fx_form["use_live_price"] = _truthy(request.form.get("fx_use_live_price", fx_form["use_live_price"]))
             fx_form["S"] = request.form.get("fx_S", fx_form["S"])
             fx_form["K"] = request.form.get("fx_K", fx_form["K"])
             fx_form["rd"] = float(request.form.get("fx_rd", fx_form["rd"]) or 0.0)
@@ -820,7 +837,7 @@ def index():
             eq_form["option_type"] = request.form.get("eq_option_type", eq_form["option_type"])
             eq_form["model"] = request.form.get("eq_model", eq_form["model"])
             eq_form["symbol"] = sanitize_symbol(request.form.get("eq_symbol", eq_form["symbol"]))
-            eq_form["use_live_price"] = request.form.get("eq_use_live_price")
+            eq_form["use_live_price"] = _truthy(request.form.get("eq_use_live_price", eq_form["use_live_price"]))
             eq_form["S"] = request.form.get("eq_S", eq_form["S"])
             eq_form["K"] = request.form.get("eq_K", eq_form["K"])
             eq_form["r"] = float(request.form.get("eq_r", eq_form["r"]) or 0.0)
@@ -950,7 +967,7 @@ def index():
             scenario_form["option_type"] = request.form.get("scenario_option_type", scenario_form["option_type"])
             scenario_form["model"] = request.form.get("scenario_model", scenario_form["model"])
             scenario_form["symbol"] = sanitize_symbol(request.form.get("scenario_symbol", scenario_form["symbol"]))
-            scenario_form["use_live_price"] = request.form.get("scenario_use_live_price")
+            scenario_form["use_live_price"] = _truthy(request.form.get("scenario_use_live_price", scenario_form["use_live_price"]))
             scenario_form["S"] = request.form.get("scenario_S", scenario_form["S"])
             scenario_form["K"] = request.form.get("scenario_K", scenario_form["K"])
             scenario_form["r"] = float(request.form.get("scenario_r", scenario_form["r"]) or 0.0)
@@ -986,7 +1003,7 @@ def index():
             active_tab = "comparison"
             comparison_form["option_type"] = request.form.get("comparison_option_type", comparison_form["option_type"])
             comparison_form["symbol"] = sanitize_symbol(request.form.get("comparison_symbol", comparison_form["symbol"]))
-            comparison_form["use_live_price"] = request.form.get("comparison_use_live_price")
+            comparison_form["use_live_price"] = _truthy(request.form.get("comparison_use_live_price", comparison_form["use_live_price"]))
             comparison_form["S"] = request.form.get("comparison_S", comparison_form["S"])
             comparison_form["K"] = request.form.get("comparison_K", comparison_form["K"])
             comparison_form["r"] = float(request.form.get("comparison_r", comparison_form["r"]) or 0.0)
